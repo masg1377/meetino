@@ -1,0 +1,21 @@
+# Top-level dockerignore — keeps every COPY . . cheap.
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/coverage
+**/*.log
+**/.DS_Store
+.git
+.github
+.vscode
+.idea
+.env
+.env.*
+!.env.production.example
+!.env.example
+infra/docker/data
+infra/docker/storage
+infra/docker/backups
+infra/docker/letsencrypt
+infra/docker/nginx-logs

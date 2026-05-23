@@ -1,0 +1,258 @@
+// Meetino — Phase 3 schema.
+// Adds Meeting + MeetingParticipant, plus ParticipantRole / ParticipantType / MeetingStatus enums.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PlatformRole {
+  ADMIN
+  HOST
+  STUDENT
+}
+
+enum MeetingStatus {
+  SCHEDULED
+  LIVE
+  ENDED
+  CANCELLED
+}
+
+enum ParticipantRole {
+  HOST
+  STUDENT
+  GUEST
+}
+
+enum ParticipantType {
+  REGISTERED
+  GUEST
+}
+
+/// Phase 7.6 — rejoin approval workflow. Kicked participants can request
+/// permission to rejoin, which the host either approves or rejects.
+enum RejoinRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id            String       @id @default(uuid()) @db.Uuid
+  email         String       @unique @db.VarChar(255)
+  passwordHash  String       @map("password_hash")
+  displayName   String       @map("display_name") @db.VarChar(120)
+  role          PlatformRole @default(STUDENT)
+  isActive      Boolean      @default(true) @map("is_active")
+  emailVerified Boolean      @default(false) @map("email_verified")
+  lastLoginAt   DateTime?    @map("last_login_at") @db.Timestamptz(6)
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  refreshTokens  RefreshToken[]
+  hostedMeetings Meeting[]              @relation("hosted_meetings")
+  endedMeetings  Meeting[]              @relation("ended_meetings")
+  participations MeetingParticipant[]
+  kickedActions  MeetingParticipant[]   @relation("participant_kicked_by")
+  /// Phase 7.6 — rejoin-request audit (who approved/rejected).
+  resolvedRejoinRequests RejoinRequest[] @relation("rejoin_resolved_by")
+
+  @@index([role])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  userAgent String?   @map("user_agent")
+  ip        String?   @db.Inet
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model Meeting {
+  id              String        @id @default(uuid()) @db.Uuid
+  slug            String        @unique @db.VarChar(20)
+  title           String        @db.VarChar(200)
+  description     String?       @db.Text
+  hostId          String        @map("host_id") @db.Uuid
+  status          MeetingStatus @default(SCHEDULED)
+  scheduledFor    DateTime?     @map("scheduled_for") @db.Timestamptz(6)
+  startedAt       DateTime?     @map("started_at") @db.Timestamptz(6)
+  endedAt         DateTime?     @map("ended_at") @db.Timestamptz(6)
+  /// Set when the meeting is ended via POST /:slug/end. Null otherwise.
+  endedById       String?       @map("ended_by_id") @db.Uuid
+  /// Phase 7: when true, only hosts/admins (or already-joined participants)
+  /// can enter. Guest-join is rejected outright.
+  isLocked        Boolean       @default(false) @map("is_locked")
+  /// Phase 7: optional password protection. Argon2id hash; raw never stored.
+  passwordHash    String?       @map("password_hash")
+  maxParticipants Int           @default(100) @map("max_participants")
+  settings        Json          @default("{}")
+  /// Phase 7.6 — captured when the meeting ENDs. Computed from startedAt..endedAt.
+  /// Persisted so reports don't have to do the math every query, and so it
+  /// survives even after the live-presence row is gone.
+  durationSeconds Int?          @map("duration_seconds")
+  /// Phase 7.6 — last moment any participant had a connection in this meeting.
+  /// Used by the auto-end cleanup job ("empty for > N minutes") so we don't
+  /// kill rooms during a noisy reconnect.
+  lastActivityAt  DateTime?     @map("last_activity_at") @db.Timestamptz(6)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  host               User                 @relation("hosted_meetings", fields: [hostId], references: [id], onDelete: Restrict)
+  endedBy            User?                @relation("ended_meetings", fields: [endedById], references: [id], onDelete: SetNull)
+  participants       MeetingParticipant[]
+  chatMessages       ChatMessage[]
+  rejoinRequests     RejoinRequest[]
+  whiteboardSnapshot WhiteboardSnapshot?
+  files              MeetingFile[]
+
+  @@index([hostId])
+  @@index([status])
+  @@index([scheduledFor])
+  @@index([status, lastActivityAt])
+  @@map("meetings")
+}
+
+model MeetingParticipant {
+  id                  String          @id @default(uuid()) @db.Uuid
+  meetingId           String          @map("meeting_id") @db.Uuid
+  userId              String?         @map("user_id") @db.Uuid
+  guestName           String?         @map("guest_name") @db.VarChar(120)
+  type                ParticipantType
+  role                ParticipantRole
+  displayNameSnapshot String          @map("display_name_snapshot") @db.VarChar(120)
+  joinedAt            DateTime?       @map("joined_at") @db.Timestamptz(6)
+  leftAt              DateTime?       @map("left_at") @db.Timestamptz(6)
+  /// Phase 7.6 — cumulative time the participant has been online in this
+  /// meeting across all reconnects. Stamped on every leave/kick/end. We
+  /// also use it for the attendance "مدت حضور" column.
+  totalDurationSeconds Int            @default(0) @map("total_duration_seconds")
+  /// Phase 7.6 — when the most recent online session started. Used to
+  /// accumulate totalDurationSeconds. Distinct from joinedAt, which is
+  /// the FIRST-ever join (and never updated after that).
+  lastJoinedAt        DateTime?       @map("last_joined_at") @db.Timestamptz(6)
+  wasKicked           Boolean         @default(false) @map("was_kicked")
+  /// Phase 7 — when wasKicked, also stamp the moment + the actor.
+  kickedAt            DateTime?       @map("kicked_at") @db.Timestamptz(6)
+  kickedById          String?         @map("kicked_by_id") @db.Uuid
+  createdAt           DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  meeting        Meeting         @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user           User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  kickedBy       User?           @relation("participant_kicked_by", fields: [kickedById], references: [id], onDelete: SetNull)
+  chatMessages   ChatMessage[]
+  rejoinRequests RejoinRequest[]
+  uploadedFiles  MeetingFile[]
+
+  @@index([meetingId])
+  @@index([userId])
+  @@index([meetingId, userId])
+  @@map("meeting_participants")
+}
+
+/// Phase 7.7 — collaborative whiteboard.
+/// We persist ONLY the latest snapshot per meeting (one row, upserted). The
+/// realtime stream of fine-grained draw events is not stored — peers exchange
+/// them over the gateway and apply optimistically; late-joiners replay the
+/// snapshot on connect. `revision` is bumped on every snapshot so out-of-order
+/// network deliveries can be ignored cheaply.
+model WhiteboardSnapshot {
+  meetingId String   @id @map("meeting_id") @db.Uuid
+  /// JSON-serialized array of `StrokeOp` items (see @meetino/shared).
+  data      Json
+  revision  Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@map("whiteboard_snapshots")
+}
+
+/// Phase 7.7 — files shared inside a meeting.
+/// Storage is local disk (MEDIA_UPLOAD_DIR). The DB row carries the *logical*
+/// name + the stored filename and never exposes the absolute path to clients.
+model MeetingFile {
+  id                       String   @id @default(uuid()) @db.Uuid
+  meetingId                String   @map("meeting_id") @db.Uuid
+  /// Participant who uploaded it. Nullable because the participant row
+  /// might be deleted later (e.g. guest cleanup) — we keep the snapshot
+  /// fields below so the file stays attributable.
+  uploadedByParticipantId  String?  @map("uploaded_by_participant_id") @db.Uuid
+  /// Snapshot of the uploader's display name at the time of upload.
+  uploadedByDisplayName    String   @map("uploaded_by_display_name") @db.VarChar(120)
+  originalName             String   @map("original_name") @db.VarChar(255)
+  /// Sanitized, unique filename on disk (UUID + safe extension).
+  storedName               String   @unique @map("stored_name") @db.VarChar(255)
+  mimeType                 String   @map("mime_type") @db.VarChar(120)
+  sizeBytes                Int      @map("size_bytes")
+  createdAt                DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  meeting     Meeting             @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  uploadedBy  MeetingParticipant? @relation(fields: [uploadedByParticipantId], references: [id], onDelete: SetNull)
+
+  @@index([meetingId, createdAt])
+  @@map("meeting_files")
+}
+
+/// Phase 7.6 — Rejoin requests from kicked participants.
+/// One participant can have multiple requests over time (e.g. host
+/// rejected the first one, kicked user tries again). Only the most-recent
+/// PENDING request is honored.
+model RejoinRequest {
+  id            String              @id @default(uuid()) @db.Uuid
+  meetingId     String              @map("meeting_id") @db.Uuid
+  participantId String              @map("participant_id") @db.Uuid
+  status        RejoinRequestStatus @default(PENDING)
+  /// Optional Persian/free-text reason the participant submits.
+  message       String?             @db.VarChar(280)
+  /// User who approved/rejected (host or admin). Null while PENDING.
+  resolvedById  String?             @map("resolved_by_id") @db.Uuid
+  resolvedAt    DateTime?           @map("resolved_at") @db.Timestamptz(6)
+  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  meeting     Meeting            @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  participant MeetingParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  resolvedBy  User?              @relation("rejoin_resolved_by", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([meetingId, status])
+  @@index([participantId, status])
+  @@map("rejoin_requests")
+}
+
+/// Persisted in-meeting chat. Sender identity is snapshotted onto the row
+/// so the message remains readable even if the participant is deleted.
+/// History is paged by createdAt; we ALWAYS scope reads by meetingId.
+model ChatMessage {
+  id                String          @id @default(uuid()) @db.Uuid
+  meetingId         String          @map("meeting_id") @db.Uuid
+  /// Nullable — keeps the message after a participant row is removed.
+  participantId     String?         @map("participant_id") @db.Uuid
+  senderDisplayName String          @map("sender_display_name") @db.VarChar(120)
+  senderRole        ParticipantRole @map("sender_role")
+  senderType        ParticipantType @map("sender_type")
+  body              String          @db.Text
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  meeting     Meeting             @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  participant MeetingParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
+
+  @@index([meetingId, createdAt])
+  @@index([participantId])
+  @@map("chat_messages")
+}

@@ -1,0 +1,280 @@
+# ─────────────────────────────────────────────────────────────
+# Meetino — production stack on a single Iran VPS.
+#
+# Brings up:
+#   - postgres        (private; data on a named volume)
+#   - redis           (private; AOF on a named volume)
+#   - api             (Nest)
+#   - web             (Next standalone)
+#   - livekit         (SFU; reads livekit.prod.yaml)
+#   - coturn          (TURN; reads turnserver.conf)
+#   - nginx           (HTTPS reverse proxy + Let's Encrypt webroot)
+#
+# Usage:
+#   cd infra/docker
+#   docker compose -f docker-compose.prod.yml --env-file ../../.env.production up -d
+#
+# Build context for api/web is the repo root (`..`). The compose file
+# lives at infra/docker/, so context: ../.. resolves there.
+#
+# Public ports (Nginx + LiveKit/coturn UDP) come from the host network;
+# Postgres + Redis are NOT exposed — they live inside the bridge network.
+# ─────────────────────────────────────────────────────────────
+
+# Anchors for readable repeated config blocks.
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: '10m'
+      max-file: '5'
+
+services:
+  # ── PostgreSQL ─────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: meetino_postgres
+    <<: [*restart, *logging]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - meetino_net
+    # Internal only — never publish 5432 publicly.
+
+  # ── Redis ──────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: meetino_redis
+    <<: [*restart, *logging]
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      # Use the password if set; ping unauthenticated otherwise.
+      test:
+        - 'CMD-SHELL'
+        - |
+          if [ -n "$$REDIS_PASSWORD" ]; then
+            redis-cli -a "$$REDIS_PASSWORD" ping
+          else
+            redis-cli ping
+          fi
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    networks:
+      - meetino_net
+    # Internal only.
+
+  # ── API (NestJS) ───────────────────────────────────────────────
+  api:
+    image: meetino-api:${IMAGE_TAG:-latest}
+    container_name: meetino_api
+    <<: [*restart, *logging]
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      API_PORT: 4000
+      API_HOST: 0.0.0.0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      WEB_ORIGIN: ${WEB_ORIGIN}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      # The backend echoes this URL back to clients in the token response,
+      # so it MUST be the public wss:// URL behind nginx.
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_TOKEN_TTL_MINUTES: ${LIVEKIT_TOKEN_TTL_MINUTES:-360}
+      # Phase 7.7 — shared-file storage. The path below is INSIDE the
+      # container; the matching host directory is the named volume below.
+      MEDIA_UPLOAD_DIR: /app/apps/api/storage/meeting-files
+      MEDIA_MAX_FILE_BYTES: ${MEDIA_MAX_FILE_BYTES:-26214400}
+    volumes:
+      - meeting_files:/app/apps/api/storage/meeting-files
+    healthcheck:
+      test:
+        - 'CMD-SHELL'
+        - 'wget -q --spider http://127.0.0.1:4000/api/health/live || exit 1'
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - meetino_net
+    # Internal only — exposed through nginx on api.<DOMAIN>.
+
+  # ── Web (Next.js standalone) ───────────────────────────────────
+  web:
+    image: meetino-web:${IMAGE_TAG:-latest}
+    container_name: meetino_web
+    <<: [*restart, *logging]
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+      args:
+        # These are baked at build time. If you change them, rebuild.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Meetino}
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    healthcheck:
+      test:
+        - 'CMD-SHELL'
+        - 'wget -q --spider http://127.0.0.1:3000/ || exit 1'
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - meetino_net
+    # Internal only — exposed through nginx on the main DOMAIN.
+
+  # ── LiveKit (self-hosted SFU) ──────────────────────────────────
+  # Public for WebRTC media. UDP range comes from livekit.prod.yaml.
+  livekit:
+    image: livekit/livekit-server:v1.8.4
+    container_name: meetino_livekit
+    <<: [*restart, *logging]
+    command: ['--config', '/etc/livekit.yaml']
+    # network_mode: host is the only way to expose the LiveKit UDP RTC
+    # range without "port: 50000-60000/udp" expanding to 10001 iptables
+    # rules. The host-networking trade-off: localhost-relative addresses
+    # disappear, so livekit.prod.yaml uses 0.0.0.0 / the public IP.
+    network_mode: host
+    volumes:
+      - ./livekit/livekit.prod.yaml:/etc/livekit.yaml:ro
+    healthcheck:
+      test:
+        - 'CMD-SHELL'
+        - 'wget -q --spider http://127.0.0.1:7880/ || exit 1'
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── coturn (TURN/STUN) ─────────────────────────────────────────
+  # Also on host networking so the UDP port range is exposed directly.
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: meetino_coturn
+    <<: [*restart, *logging]
+    network_mode: host
+    command:
+      - '-c'
+      - '/etc/coturn/turnserver.conf'
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - coturn_data:/var/lib/coturn
+
+  # ── Nginx (HTTPS reverse proxy + Let's Encrypt webroot) ────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: meetino_nginx
+    <<: [*restart, *logging]
+    depends_on:
+      - api
+      - web
+    # Maps `host.docker.internal` to the host gateway so the livekit
+    # vhost can proxy to LiveKit (which runs on the host network).
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Self-signed certs — mounted at /etc/selfsigned (referenced in 10-ip-only.conf).
+      # When switching to Let's Encrypt + domain: remove this line, uncomment below,
+      # delete 10-ip-only.conf, and run render-nginx.sh.
+      - ./certs:/etc/selfsigned:ro
+      # - letsencrypt:/etc/letsencrypt:ro
+      - acme_webroot:/var/www/acme:ro
+      - nginx_logs:/var/log/nginx
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1/']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - meetino_net
+
+  # ── Certbot (run as one-shot for cert issuance + renewal) ─────
+  # Use it via:
+  #   docker compose -f docker-compose.prod.yml run --rm certbot ...
+  # See README.production.md for the exact commands.
+  certbot:
+    image: certbot/certbot:latest
+    container_name: meetino_certbot
+    # Not in the running stack — it's a one-shot. Compose still keeps it
+    # around so the image is pre-pulled and shares the volumes.
+    profiles: ['ssl']
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - acme_webroot:/var/www/acme
+    entrypoint: ['certbot']
+
+# ── Volumes ────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    name: meetino_prod_postgres_data
+  redis_data:
+    name: meetino_prod_redis_data
+  meeting_files:
+    name: meetino_prod_meeting_files
+  # letsencrypt volume is replaced by ./certs bind mount for offline deployment.
+  # Uncomment when switching to Let's Encrypt:
+  # letsencrypt:
+  #   name: meetino_prod_letsencrypt
+  acme_webroot:
+    name: meetino_prod_acme_webroot
+  nginx_logs:
+    name: meetino_prod_nginx_logs
+  coturn_data:
+    name: meetino_prod_coturn_data
+
+# ── Network ────────────────────────────────────────────────────────
+networks:
+  meetino_net:
+    name: meetino_prod_net
+    driver: bridge

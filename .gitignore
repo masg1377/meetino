@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+
+# Turbo
+.turbo/
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Prisma
+apps/api/src/prisma/*.db
+apps/api/src/prisma/*.db-journal
+
+# Docker volumes
+infra/docker/data/
+
+# Self-signed SSL certs (private key — never commit)
+# The infra/docker/certs/ directory is transferred via rsync, not git.
+infra/docker/certs/
+
+# Backups
+*.sql.gz
+backups/

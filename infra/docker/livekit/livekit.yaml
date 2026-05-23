@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────
+# Meetino — LiveKit server (local development)
+#
+# DO NOT deploy this file to production unchanged:
+#   - replace the dev key/secret below with strong random values
+#   - configure coturn as TURN (use_external_ip true, public IP)
+#   - lock down stun_servers to your own coturn / public list
+#
+# The values here match the dev defaults in .env.example so
+# LIVEKIT_API_KEY=devkey, LIVEKIT_API_SECRET=<the secret below>.
+# ─────────────────────────────────────────────────────────────
+
+port: 7880
+log_level: info
+bind_addresses:
+  - ""
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  # Localhost dev: don't STUN to discover an external IP. This also avoids
+  # the default lookup against stun.l.google.com, which is blocked in Iran.
+  use_external_ip: false
+  # Browser on the same host reaches the server via 127.0.0.1. Override to
+  # the LAN IP if you want to test from a phone on the same network.
+  node_ip: "127.0.0.1"
+  # No public STUN — direct host candidates are enough for localhost dev.
+  stun_servers: []
+
+# Dev keys ONLY. Replace before any external deployment.
+keys:
+  devkey: meetino_dev_only_secret_change_me_for_prod_min32chars_abcdef

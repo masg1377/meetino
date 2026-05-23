@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────
+# Meetino — API subdomain vhost (NestJS).
+#
+# Routes:
+#   /api/*                                  → REST endpoints
+#   /realtime/  (socket.io namespace)       → WebSocket upgrade
+#
+# Replace ${API_DOMAIN} with the real subdomain (e.g. api.meetino.example.com).
+# ─────────────────────────────────────────────────────────────
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${API_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
+    ssl_session_cache shared:MeetinoSSL:10m;
+    ssl_session_timeout 1d;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!MD5;
+    ssl_prefer_server_ciphers off;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # File-upload route inherits the global 30m client_max_body_size,
+    # but a per-location override here keeps the value next to the route.
+    location /api/ {
+        client_max_body_size 30m;
+        proxy_pass http://api:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+        # Allow long-lived large uploads.
+        proxy_request_buffering off;
+    }
+
+    # Socket.IO realtime namespace. The path matches main.ts (default '/realtime').
+    location /realtime/ {
+        proxy_pass http://api:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # Idle WebSocket can stay open as long as people are in the meeting.
+        proxy_read_timeout 6h;
+        proxy_send_timeout 6h;
+    }
+
+    # ACME challenge.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+        try_files $uri =404;
+    }
+
+    # Anything else → 404 (the API is the only consumer of this subdomain).
+    location / {
+        return 404;
+    }
+}

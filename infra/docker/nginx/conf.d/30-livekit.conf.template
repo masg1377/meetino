@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────
+# Meetino — LiveKit signaling vhost.
+#
+# This terminates TLS for the WebSocket signaling channel only. Media
+# (RTP) still flows directly between browser and LiveKit over UDP (or
+# TURN/TCP fallback) — see livekit.prod.yaml + turnserver.conf.
+#
+# Replace ${LIVEKIT_DOMAIN} (e.g. livekit.meetino.example.com).
+# ─────────────────────────────────────────────────────────────
+
+# The LiveKit container is on host networking; reach it by 127.0.0.1.
+# `nginx -> host` works because the nginx container's bridge network
+# inherits the docker host's host alias.
+upstream livekit_upstream {
+    # 7880 is LiveKit's signaling port (configured in livekit.prod.yaml).
+    server host.docker.internal:7880;
+    # Linux fallback — host.docker.internal isn't always available.
+    # If your distro doesn't ship it, add an `extra_hosts:` to nginx in
+    # docker-compose.prod.yml, e.g. host.docker.internal:host-gateway.
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${LIVEKIT_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${LIVEKIT_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${LIVEKIT_DOMAIN}/privkey.pem;
+    ssl_session_cache shared:MeetinoSSL:10m;
+    ssl_session_timeout 1d;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!MD5;
+    ssl_prefer_server_ciphers off;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # The signaling endpoint LiveKit exposes is /rtc. Most clients also
+    # hit / and /rtc/validate, so we proxy every path.
+    location / {
+        proxy_pass http://livekit_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # WebSocket conversations live for the meeting; default 60s would
+        # disconnect everyone.
+        proxy_read_timeout 6h;
+        proxy_send_timeout 6h;
+    }
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+        try_files $uri =404;
+    }
+}

@@ -1,0 +1,94 @@
+# ─────────────────────────────────────────────────────────────
+# Meetino — local development stack (Phase 1)
+#
+# Brings up Postgres, Redis, and LiveKit on the same Docker network.
+# API and Web run on the host via `pnpm dev` for fast hot reload.
+# coturn / TURN is left to the production deployment phase.
+#
+# Usage from repo root:
+#   pnpm docker:up
+#   pnpm docker:down
+#   pnpm docker:logs
+# ─────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: meetino_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-meetino}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meetino_dev_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-meetino}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-meetino} -d ${POSTGRES_DB:-meetino}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - meetino_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: meetino_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - meetino_net
+
+  # ── LiveKit (self-hosted SFU) ─────────────────────────────────────
+  # The server reads its config from ./livekit/livekit.yaml. Ports:
+  #   7880  : WebSocket signaling (browser connects here)
+  #   7881  : RTC TCP fallback
+  #   7882  : RTC UDP (preferred media path)
+  # For Mac development we publish UDP on the host loopback so the
+  # browser can reach it; node_ip in the YAML is set to 127.0.0.1.
+  livekit:
+    # Pinned to v1.8.4 (signaling protocol 15). The web client is pinned to
+    # livekit-client 2.5.7, which also speaks protocol 15 — the two must match
+    # or SDP negotiation fails ("NegotiationError: negotiation timed out").
+    # When you bump one side, bump the other:
+    #   - server v1.8.x ↔ client 2.5.x   (protocol 15)
+    #   - server v1.10.x ↔ client 2.15+   (protocol 17)
+    image: livekit/livekit-server:v1.8.4
+    container_name: meetino_livekit
+    restart: unless-stopped
+    command: ['--config', '/etc/livekit.yaml']
+    ports:
+      - '7880:7880'
+      - '7881:7881'
+      - '7882:7882/udp'
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    networks:
+      - meetino_net
+
+volumes:
+  postgres_data:
+    name: meetino_postgres_data
+  redis_data:
+    name: meetino_redis_data
+
+networks:
+  meetino_net:
+    name: meetino_net
+    driver: bridge

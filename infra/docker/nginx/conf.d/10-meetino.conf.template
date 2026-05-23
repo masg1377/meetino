@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────
+# Meetino — main domain vhost (the Next.js web client).
+#
+# COPY THIS FILE to 10-meetino.conf and REPLACE the placeholders:
+#   ${DOMAIN}            → meetino.example.com
+#
+# Certbot stores keys at /etc/letsencrypt/live/<domain>/...
+# The first cert is issued AFTER nginx is up but BEFORE this server
+# block is enabled — see README.production.md "SSL setup".
+# ─────────────────────────────────────────────────────────────
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_session_cache shared:MeetinoSSL:10m;
+    ssl_session_timeout 1d;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!MD5;
+    ssl_prefer_server_ciphers off;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Security headers. CSP is intentionally relaxed for media (blob:,
+    # data:, wss:) — tighten in Phase 9 once we have a fixed origin set.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(self), microphone=(self), display-capture=(self)" always;
+
+    # The web container is host-internal only; route by container DNS.
+    location / {
+        proxy_pass http://web:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    # ACME challenges also work via this vhost (defense in depth).
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+        try_files $uri =404;
+    }
+}

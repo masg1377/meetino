@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────
+ * Vazirmatn (Persian/Latin) — self-hosted, no external CDN.
+ *
+ * The @font-face declarations are commented out until you drop the
+ * woff2 files into apps/web/public/fonts/vazirmatn/. Without the files,
+ * the system-font fallback in tailwind.config.ts handles Persian fine.
+ *
+ * To enable Vazirmatn:
+ *   1. Download from https://github.com/rastikerdar/vazirmatn/releases
+ *   2. Place Vazirmatn-Regular.woff2, Vazirmatn-Medium.woff2,
+ *      Vazirmatn-Bold.woff2 in apps/web/public/fonts/vazirmatn/
+ *   3. Uncomment the @font-face blocks below.
+ * ─────────────────────────────────────────────────────────────*/
+/*
+@font-face {
+  font-family: 'Vazirmatn';
+  src: url('/fonts/vazirmatn/Vazirmatn-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Vazirmatn';
+  src: url('/fonts/vazirmatn/Vazirmatn-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Vazirmatn';
+  src: url('/fonts/vazirmatn/Vazirmatn-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+*/
+
+:root {
+  --color-bg: #0b1020;
+  --color-surface: #ffffff;
+  --color-text: #0f172a;
+  --color-muted: #64748b;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: theme('fontFamily.sans');
+  color: var(--color-text);
+  background-color: #f8fafc;
+}

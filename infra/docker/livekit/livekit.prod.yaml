@@ -1,0 +1,21 @@
+port: 7880
+log_level: info
+bind_addresses:
+  - ""
+
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: false
+  node_ip: "188.121.117.190"
+  stun_servers: []
+
+turn:
+  enabled: false
+
+logging:
+  level: info
+  json: false
+
+keys:
+  APImeetino: 12e337d9a9a0f7b62dfb7abdb1d0029c28f75c7ccc448f5363683c020e974425
